@@ -1,18 +1,22 @@
-# WinGo 30S Predictor - Python Edition
+# WinGo 30S Predictor - Python ML Edition
 
-A Python-powered prediction system for WinGo 30S game that uses historical data analysis to make predictions.
+A Python-powered prediction system for WinGo 30S game that uses machine learning-style pattern analysis and historical data to make predictions. Data is stored in JSON files for persistence.
 
 ## Features
 
-- **Persistent Data Storage**: All outcomes are saved in SQLite database, making predictions improve over time
-- **Advanced Prediction Algorithm**: Uses multiple strategies including:
-  - Streak reversal detection
-  - Historical pattern analysis
-  - Distribution bias correction
-  - Alternation pattern detection
+- **JSON-based Storage**: All outcomes, predictions, and model data stored in JSON files for easy portability
+- **ML-Style Prediction Engine**: Uses multiple intelligent strategies:
+  - **Markov Chain**: Transition probability analysis
+  - **Streak Pattern Learning**: Learns from historical streak outcomes
+  - **Sequence Pattern Recognition**: 3-tuple sequence-based predictions
+  - **Distribution Bias Correction**: Adjusts for recent distribution anomalies
+  - **Alternation Detection**: Recognizes alternating patterns
+- **Ensemble Voting**: Combines multiple strategies with weighted confidence
 - **Real-time Updates**: Polls for new data and updates predictions automatically
-- **Confidence Scoring**: Shows prediction confidence based on the strategy used
-- **Strategy Transparency**: Displays the reasoning behind each prediction
+- **Confidence Scoring**: Shows prediction confidence with color-coded visualization
+- **Strategy Transparency**: Displays all active strategies and their predictions
+- **Win/Loss Tracking**: Tracks prediction accuracy with stages and streaks
+- **Model Accuracy**: Shows overall model performance
 
 ## Requirements
 
@@ -49,10 +53,14 @@ A Python-powered prediction system for WinGo 30S game that uses historical data 
 
 ```
 wingo-predictor/
-├── app.py              # Main Flask application with prediction logic
+├── app.py              # Main Flask application with ML prediction logic
 ├── requirements.txt    # Python dependencies
 ├── templates/
 │   └── index.html      # Frontend UI
+├── data/               # Auto-created directory for JSON storage
+│   ├── outcomes.json   # Historical outcomes
+│   ├── predictions.json # Prediction history
+│   └── model.json      # Trained model data
 ├── index.html          # Original HTML-only version (legacy)
 └── README.md           # This file
 ```
@@ -60,27 +68,35 @@ wingo-predictor/
 ## API Endpoints
 
 - `GET /` - Main application UI
-- `GET /api/predict` - Get the next prediction with confidence and reasoning
+- `GET /api/predict` - Get the next prediction with confidence, reasoning, and all strategies
 - `GET /api/history` - Get prediction history and statistics
-- `GET /api/analysis` - Get detailed analysis of historical data
-- `POST /api/clear` - Clear prediction history (keeps outcome data)
+- `GET /api/analysis` - Get detailed analysis including model info
+- `POST /api/clear` - Clear prediction history (keeps learned patterns)
 
 ## How It Works
 
-1. **Data Collection**: The system fetches lottery outcomes from the official API and stores them in a SQLite database.
+### 1. Data Collection
+The system fetches lottery outcomes from the official API and stores them in `data/outcomes.json`.
 
-2. **Pattern Analysis**: Analyzes historical data to find:
-   - Big/Small distribution percentages
-   - Streak patterns and their frequencies
-   - What typically comes after streaks of different lengths
+### 2. ML Model Training
+The model learns from historical data:
+- **Markov Chain**: Builds transition probabilities (Big→Big, Big→Small, etc.)
+- **Streak Patterns**: Learns what typically follows streaks of 2-7 consecutive outcomes
+- **Sequence Patterns**: Maps 3-outcome sequences to next outcome probabilities
 
-3. **Prediction Strategies**:
-   - **Streak Reversal**: Predicts opposite after 3+ consecutive same outcomes
-   - **Historical Patterns**: Uses past data to predict what comes after specific patterns
-   - **Bias Correction**: Adjusts predictions if recent results deviate from historical norms
-   - **Alternation Detection**: Recognizes alternating patterns
+### 3. Prediction Strategies
+Multiple strategies run simultaneously:
+- **Markov Chain**: Uses learned transition probabilities
+- **Streak Analysis**: Considers current streak length and historical patterns
+- **Sequence Pattern**: Matches current 3-outcome sequence to historical data
+- **Distribution Correction**: Adjusts when recent results deviate significantly
+- **Alternation Detection**: Recognizes ongoing alternating patterns
 
-4. **Learning**: The more data collected, the better the pattern analysis becomes, improving prediction accuracy over time.
+### 4. Ensemble Voting
+Strategies vote on the prediction with their confidence levels. The final prediction is based on weighted voting where higher confidence strategies have more influence.
+
+### 5. Continuous Learning
+The model updates with each new outcome, improving accuracy over time.
 
 ## Made By
 

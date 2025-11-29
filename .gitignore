@@ -31,6 +31,9 @@ env/
 *.sqlite
 *.sqlite3
 
+# Data files (JSON storage)
+data/
+
 # IDE
 .vscode/
 .idea/

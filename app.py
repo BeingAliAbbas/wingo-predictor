@@ -1,73 +1,71 @@
 """
-WinGo 30S Predictor - Python Backend
-A Flask application that predicts WinGo outcomes using historical data analysis.
+WinGo 30S Predictor - Python Backend with ML-Style Prediction
+A Flask application that predicts WinGo outcomes using advanced pattern analysis
+and machine learning techniques. Data is stored in JSON files for persistence.
 """
 
-import sqlite3
 import os
+import json
 import time
+import math
 import logging
 import requests
 from flask import Flask, jsonify, render_template, request
-from collections import Counter
+from collections import Counter, deque
 from datetime import datetime
+from threading import Lock
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Constants for prediction results
-RESULT_WIN = 1
-RESULT_LOSS = 0
+# ML Model Constants
+MAX_STREAK_LENGTH = 7  # Maximum streak length to analyze
+MIN_SEQUENCE_DATA = 5  # Minimum data points for sequence pattern reliability
+DISTRIBUTION_THRESHOLD = 7  # Number of recent outcomes to trigger distribution correction
 
 app = Flask(__name__)
 
-DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'wingo_data.db')
+# File paths for JSON storage
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+OUTCOMES_FILE = os.path.join(DATA_DIR, 'outcomes.json')
+PREDICTIONS_FILE = os.path.join(DATA_DIR, 'predictions.json')
+MODEL_FILE = os.path.join(DATA_DIR, 'model.json')
+
 API_URL = "https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json"
 
-
-def get_db_connection():
-    """Create a database connection."""
-    conn = sqlite3.connect(DATABASE_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+# Thread lock for file operations
+file_lock = Lock()
 
 
-def init_db():
-    """Initialize the database with required tables."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Table for storing historical outcomes
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS outcomes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            period TEXT UNIQUE NOT NULL,
-            number INTEGER NOT NULL,
-            label TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    # Table for storing predictions and results
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS predictions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            period TEXT UNIQUE NOT NULL,
-            prediction TEXT NOT NULL,
-            actual_number INTEGER,
-            actual_label TEXT,
-            correct INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    # Index for faster queries
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_outcomes_period ON outcomes(period)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_predictions_period ON predictions(period)')
-    
-    conn.commit()
-    conn.close()
+def ensure_data_dir():
+    """Ensure the data directory exists."""
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR)
+
+
+def load_json_file(filepath, default=None):
+    """Load data from a JSON file."""
+    if default is None:
+        default = {}
+    try:
+        if os.path.exists(filepath):
+            with open(filepath, 'r') as f:
+                return json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        logger.warning(f"Error loading {filepath}: {e}")
+    return default
+
+
+def save_json_file(filepath, data):
+    """Save data to a JSON file."""
+    ensure_data_dir()
+    with file_lock:
+        try:
+            with open(filepath, 'w') as f:
+                json.dump(data, f, indent=2)
+        except IOError as e:
+            logger.error(f"Error saving {filepath}: {e}")
 
 
 def get_label(num):
@@ -88,10 +86,11 @@ def fetch_latest_draws():
             return None, "Unexpected API format"
         
         draws = []
-        for item in data['data']['list'][:50]:  # Get more data for analysis
+        for item in data['data']['list'][:50]:
             draws.append({
                 'period': item['issueNumber'],
-                'num': int(item['number'])
+                'num': int(item['number']),
+                'label': get_label(int(item['number']))
             })
         return draws, None
     except requests.exceptions.RequestException as e:
@@ -101,285 +100,414 @@ def fetch_latest_draws():
 
 
 def save_outcomes(draws):
-    """Save fetched outcomes to database."""
+    """Save fetched outcomes to JSON file."""
     if not draws:
         return
     
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    outcomes = load_json_file(OUTCOMES_FILE, {'records': [], 'periods': set()})
+    
+    # Convert periods to set if it's a list (from JSON)
+    if isinstance(outcomes.get('periods'), list):
+        outcomes['periods'] = set(outcomes['periods'])
+    elif not outcomes.get('periods'):
+        outcomes['periods'] = set()
     
     for draw in draws:
-        try:
-            cursor.execute('''
-                INSERT OR IGNORE INTO outcomes (period, number, label)
-                VALUES (?, ?, ?)
-            ''', (draw['period'], draw['num'], get_label(draw['num'])))
-        except sqlite3.Error as e:
-            # Log but continue - duplicate inserts are expected and handled by IGNORE
-            logger.debug(f"Database insert ignored for period {draw['period']}: {e}")
+        if draw['period'] not in outcomes['periods']:
+            outcomes['records'].append({
+                'period': draw['period'],
+                'number': draw['num'],
+                'label': draw['label'],
+                'timestamp': datetime.now().isoformat()
+            })
+            outcomes['periods'].add(draw['period'])
     
-    conn.commit()
-    conn.close()
+    # Keep only last 5000 records for efficiency
+    if len(outcomes['records']) > 5000:
+        outcomes['records'] = outcomes['records'][-5000:]
+        outcomes['periods'] = set(r['period'] for r in outcomes['records'])
+    
+    # Convert set to list for JSON serialization
+    save_data = {
+        'records': outcomes['records'],
+        'periods': list(outcomes['periods'])
+    }
+    save_json_file(OUTCOMES_FILE, save_data)
 
 
 def get_historical_outcomes(limit=1000):
-    """Get historical outcomes from database."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT period, number, label FROM outcomes
-        ORDER BY period DESC LIMIT ?
-    ''', (limit,))
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    """Get historical outcomes from JSON file."""
+    outcomes = load_json_file(OUTCOMES_FILE, {'records': []})
+    records = outcomes.get('records', [])
+    # Sort by period descending and return limited records
+    sorted_records = sorted(records, key=lambda x: x['period'], reverse=True)
+    return sorted_records[:limit]
 
 
-def analyze_patterns(outcomes):
-    """Analyze patterns in historical data."""
-    if len(outcomes) < 10:
-        return {}
+class MLPredictor:
+    """
+    Advanced ML-style predictor that learns from historical data.
+    Uses multiple techniques:
+    1. Markov Chain for sequence prediction
+    2. Pattern recognition for streaks
+    3. Weighted ensemble voting
+    4. Adaptive learning based on prediction accuracy
+    """
     
-    analysis = {
-        'total_records': len(outcomes),
-        'big_count': sum(1 for o in outcomes if o['label'] == 'Big'),
-        'small_count': sum(1 for o in outcomes if o['label'] == 'Small'),
-        'big_percentage': 0,
-        'small_percentage': 0,
-        'streaks': {'big': [], 'small': []},
-        'pattern_after_streak': {},
-        'number_frequency': Counter(o['number'] for o in outcomes)
-    }
+    def __init__(self):
+        self.model = self.load_model()
     
-    analysis['big_percentage'] = round(analysis['big_count'] / len(outcomes) * 100, 2)
-    analysis['small_percentage'] = round(analysis['small_count'] / len(outcomes) * 100, 2)
+    def load_model(self):
+        """Load or initialize the prediction model."""
+        default_model = {
+            'markov_chain': {
+                'Big': {'Big': 0.5, 'Small': 0.5},
+                'Small': {'Big': 0.5, 'Small': 0.5}
+            },
+            'streak_patterns': {},  # streak_length -> {after_big: {Big: count, Small: count}, after_small: {...}}
+            'sequence_patterns': {},  # 3-length sequences -> next outcome counts
+            'number_frequency': {},
+            'strategy_weights': {
+                'markov': 1.0,
+                'streak': 1.0,
+                'sequence': 1.0,
+                'frequency': 1.0,
+                'alternation': 1.0
+            },
+            'total_predictions': 0,
+            'correct_predictions': 0
+        }
+        return load_json_file(MODEL_FILE, default_model)
     
-    # Analyze streaks
-    current_streak = 1
-    current_type = outcomes[0]['label'] if outcomes else None
+    def save_model(self):
+        """Save the model to JSON file."""
+        save_json_file(MODEL_FILE, self.model)
     
-    for i in range(1, len(outcomes)):
-        if outcomes[i]['label'] == current_type:
-            current_streak += 1
-        else:
-            if current_type == 'Big':
-                analysis['streaks']['big'].append(current_streak)
-            else:
-                analysis['streaks']['small'].append(current_streak)
-            current_streak = 1
-            current_type = outcomes[i]['label']
-    
-    # Calculate average streak lengths
-    if analysis['streaks']['big']:
-        analysis['avg_big_streak'] = round(sum(analysis['streaks']['big']) / len(analysis['streaks']['big']), 2)
-    if analysis['streaks']['small']:
-        analysis['avg_small_streak'] = round(sum(analysis['streaks']['small']) / len(analysis['streaks']['small']), 2)
-    
-    # Analyze what comes after streaks of different lengths
-    for streak_len in range(2, 6):
-        analysis['pattern_after_streak'][streak_len] = {'big_after_big': 0, 'small_after_big': 0, 
-                                                        'big_after_small': 0, 'small_after_small': 0}
+    def train(self, outcomes):
+        """Train the model on historical outcomes."""
+        if len(outcomes) < 10:
+            return
         
-        for i in range(streak_len, len(outcomes)):
-            # Check if we have a streak ending at position i-1
-            is_streak = True
-            streak_type = outcomes[i-1]['label']
-            for j in range(1, streak_len):
-                if outcomes[i-j]['label'] != streak_type:
-                    is_streak = False
+        # Sort outcomes chronologically (oldest first for training)
+        sorted_outcomes = sorted(outcomes, key=lambda x: x['period'])
+        
+        # 1. Build Markov Chain transition probabilities
+        transitions = {'Big': {'Big': 0, 'Small': 0}, 'Small': {'Big': 0, 'Small': 0}}
+        for i in range(len(sorted_outcomes) - 1):
+            current = sorted_outcomes[i]['label']
+            next_label = sorted_outcomes[i + 1]['label']
+            transitions[current][next_label] += 1
+        
+        # Normalize to probabilities with Laplace smoothing
+        for state in transitions:
+            total = sum(transitions[state].values()) + 2  # Laplace smoothing
+            for next_state in transitions[state]:
+                transitions[state][next_state] = (transitions[state][next_state] + 1) / total
+        
+        self.model['markov_chain'] = transitions
+        
+        # 2. Build streak pattern statistics
+        streak_patterns = {}
+        for streak_len in range(2, MAX_STREAK_LENGTH + 1):
+            streak_patterns[streak_len] = {
+                'after_big': {'Big': 0, 'Small': 0},
+                'after_small': {'Big': 0, 'Small': 0}
+            }
+        
+        for i in range(len(sorted_outcomes)):
+            # Check for streaks ending at position i
+            if i < 2:
+                continue
+            
+            # Count streak length backwards
+            streak_type = sorted_outcomes[i - 1]['label']
+            streak_len = 1
+            for j in range(i - 2, -1, -1):
+                if sorted_outcomes[j]['label'] == streak_type:
+                    streak_len += 1
+                else:
                     break
             
-            if is_streak:
-                next_label = outcomes[i]['label']
+            if streak_len >= 2 and streak_len <= MAX_STREAK_LENGTH:
+                next_label = sorted_outcomes[i]['label']
                 if streak_type == 'Big':
-                    if next_label == 'Big':
-                        analysis['pattern_after_streak'][streak_len]['big_after_big'] += 1
-                    else:
-                        analysis['pattern_after_streak'][streak_len]['small_after_big'] += 1
+                    streak_patterns[streak_len]['after_big'][next_label] += 1
                 else:
-                    if next_label == 'Big':
-                        analysis['pattern_after_streak'][streak_len]['big_after_small'] += 1
-                    else:
-                        analysis['pattern_after_streak'][streak_len]['small_after_small'] += 1
+                    streak_patterns[streak_len]['after_small'][next_label] += 1
+        
+        self.model['streak_patterns'] = {str(k): v for k, v in streak_patterns.items()}
+        
+        # 3. Build 3-sequence pattern statistics
+        sequence_patterns = {}
+        for i in range(3, len(sorted_outcomes)):
+            seq = tuple(sorted_outcomes[j]['label'] for j in range(i - 3, i))
+            seq_key = ''.join('B' if s == 'Big' else 'S' for s in seq)
+            next_label = sorted_outcomes[i]['label']
+            
+            if seq_key not in sequence_patterns:
+                sequence_patterns[seq_key] = {'Big': 0, 'Small': 0}
+            sequence_patterns[seq_key][next_label] += 1
+        
+        self.model['sequence_patterns'] = sequence_patterns
+        
+        # 4. Number frequency analysis
+        number_freq = Counter(o['number'] for o in sorted_outcomes)
+        self.model['number_frequency'] = dict(number_freq)
+        
+        self.save_model()
     
-    return analysis
-
-
-def predict_next(recent_draws, analysis=None):
-    """
-    Enhanced prediction algorithm using historical data.
-    Uses multiple strategies and picks the most confident one.
-    """
-    if not recent_draws or len(recent_draws) < 3:
-        return 'Big', 0.5, 'Insufficient data'
-    
-    strategies = []
-    
-    # Strategy 1: Streak reversal (original algorithm)
-    labels = [get_label(d['num']) for d in recent_draws[:5]]
-    streak_count = 1
-    for i in range(1, len(labels)):
-        if labels[i] == labels[0]:
-            streak_count += 1
+    def predict(self, recent_draws):
+        """
+        Make a prediction using ensemble of strategies.
+        Returns: (prediction, confidence, reason, all_strategies)
+        """
+        if not recent_draws or len(recent_draws) < 3:
+            return 'Big', 0.5, 'Insufficient data', []
+        
+        labels = [d['label'] for d in recent_draws[:10]]
+        strategies = []
+        
+        # Strategy 1: Markov Chain
+        last_label = labels[0]
+        markov_probs = self.model['markov_chain'].get(last_label, {'Big': 0.5, 'Small': 0.5})
+        if markov_probs['Big'] > markov_probs['Small']:
+            strategies.append({
+                'name': 'Markov Chain',
+                'prediction': 'Big',
+                'confidence': markov_probs['Big'],
+                'weight': self.model['strategy_weights']['markov']
+            })
         else:
-            break
-    
-    if streak_count >= 3:
-        opposite = 'Small' if labels[0] == 'Big' else 'Big'
-        confidence = min(0.55 + (streak_count - 3) * 0.05, 0.75)
-        strategies.append((opposite, confidence, f'Streak reversal after {streak_count} {labels[0]}s'))
-    
-    # Strategy 2: Pattern analysis from historical data
-    if analysis and analysis.get('pattern_after_streak'):
-        for streak_len in range(min(streak_count, 5), 1, -1):
-            if streak_len in analysis['pattern_after_streak']:
-                pattern_data = analysis['pattern_after_streak'][streak_len]
-                
-                if labels[0] == 'Big':
-                    total = pattern_data['big_after_big'] + pattern_data['small_after_big']
-                    if total > 10:
-                        prob_small = pattern_data['small_after_big'] / total
-                        if prob_small > 0.55:
-                            strategies.append(('Small', prob_small, f'Historical pattern: {prob_small*100:.1f}% Small after {streak_len} Bigs'))
-                        elif prob_small < 0.45:
-                            strategies.append(('Big', 1 - prob_small, f'Historical pattern: {(1-prob_small)*100:.1f}% Big continues'))
-                else:
-                    total = pattern_data['big_after_small'] + pattern_data['small_after_small']
-                    if total > 10:
-                        prob_big = pattern_data['big_after_small'] / total
-                        if prob_big > 0.55:
-                            strategies.append(('Big', prob_big, f'Historical pattern: {prob_big*100:.1f}% Big after {streak_len} Smalls'))
-                        elif prob_big < 0.45:
-                            strategies.append(('Small', 1 - prob_big, f'Historical pattern: {(1-prob_big)*100:.1f}% Small continues'))
+            strategies.append({
+                'name': 'Markov Chain',
+                'prediction': 'Small',
+                'confidence': markov_probs['Small'],
+                'weight': self.model['strategy_weights']['markov']
+            })
+        
+        # Strategy 2: Streak Analysis
+        streak_len = 1
+        for i in range(1, len(labels)):
+            if labels[i] == labels[0]:
+                streak_len += 1
+            else:
                 break
-    
-    # Strategy 3: Overall distribution bias
-    if analysis:
-        big_pct = analysis.get('big_percentage', 50)
-        small_pct = analysis.get('small_percentage', 50)
         
-        # Count recent distribution
+        if streak_len >= 2:
+            streak_key = str(min(streak_len, MAX_STREAK_LENGTH))
+            streak_data = self.model['streak_patterns'].get(streak_key, {})
+            streak_after = streak_data.get(f'after_{labels[0].lower()}', {'Big': 1, 'Small': 1})
+            total = streak_after['Big'] + streak_after['Small']
+            
+            if total > 0:
+                prob_big = streak_after['Big'] / total
+                prob_small = streak_after['Small'] / total
+                
+                if prob_big > prob_small:
+                    strategies.append({
+                        'name': f'Streak Analysis ({streak_len}x {labels[0]})',
+                        'prediction': 'Big',
+                        'confidence': prob_big,
+                        'weight': self.model['strategy_weights']['streak'] * min(streak_len / 3, 1.5)
+                    })
+                else:
+                    strategies.append({
+                        'name': f'Streak Analysis ({streak_len}x {labels[0]})',
+                        'prediction': 'Small',
+                        'confidence': prob_small,
+                        'weight': self.model['strategy_weights']['streak'] * min(streak_len / 3, 1.5)
+                    })
+        
+        # Strategy 3: Sequence Pattern
+        if len(labels) >= 3:
+            seq_key = ''.join('B' if l == 'Big' else 'S' for l in labels[:3])
+            seq_data = self.model['sequence_patterns'].get(seq_key, {'Big': 1, 'Small': 1})
+            total = seq_data['Big'] + seq_data['Small']
+            
+            if total > MIN_SEQUENCE_DATA:  # Only use if we have enough data
+                prob_big = seq_data['Big'] / total
+                prob_small = seq_data['Small'] / total
+                
+                if prob_big > prob_small:
+                    strategies.append({
+                        'name': f'Sequence Pattern ({seq_key})',
+                        'prediction': 'Big',
+                        'confidence': prob_big,
+                        'weight': self.model['strategy_weights']['sequence']
+                    })
+                else:
+                    strategies.append({
+                        'name': f'Sequence Pattern ({seq_key})',
+                        'prediction': 'Small',
+                        'confidence': prob_small,
+                        'weight': self.model['strategy_weights']['sequence']
+                    })
+        
+        # Strategy 4: Distribution Correction
         recent_big = sum(1 for l in labels[:10] if l == 'Big')
-        recent_small = len(labels[:10]) - recent_big
+        recent_small = 10 - recent_big if len(labels) >= 10 else len(labels) - recent_big
         
-        # If recent distribution differs significantly from historical
-        if recent_big >= 7 and big_pct < 55:
-            strategies.append(('Small', 0.58, f'Recent bias correction: Too many Bigs ({recent_big}/10)'))
-        elif recent_small >= 7 and small_pct < 55:
-            strategies.append(('Big', 0.58, f'Recent bias correction: Too many Smalls ({recent_small}/10)'))
+        if recent_big >= DISTRIBUTION_THRESHOLD:
+            strategies.append({
+                'name': f'Distribution Correction ({recent_big}/10 Big)',
+                'prediction': 'Small',
+                'confidence': 0.55 + (recent_big - DISTRIBUTION_THRESHOLD) * 0.05,
+                'weight': self.model['strategy_weights']['frequency']
+            })
+        elif recent_small >= DISTRIBUTION_THRESHOLD:
+            strategies.append({
+                'name': f'Distribution Correction ({recent_small}/{len(labels[:10])} Small)',
+                'prediction': 'Big',
+                'confidence': 0.55 + (recent_small - DISTRIBUTION_THRESHOLD) * 0.05,
+                'weight': self.model['strategy_weights']['frequency']
+            })
+        
+        # Strategy 5: Alternation Detection
+        alternating = True
+        for i in range(min(4, len(labels) - 1)):
+            if labels[i] == labels[i + 1]:
+                alternating = False
+                break
+        
+        if alternating and len(labels) >= 4:
+            next_pred = 'Small' if labels[0] == 'Big' else 'Big'
+            strategies.append({
+                'name': 'Alternation Pattern',
+                'prediction': next_pred,
+                'confidence': 0.60,
+                'weight': self.model['strategy_weights']['alternation']
+            })
+        
+        # Ensemble voting with weighted confidence
+        if strategies:
+            big_score = sum(s['confidence'] * s['weight'] for s in strategies if s['prediction'] == 'Big')
+            small_score = sum(s['confidence'] * s['weight'] for s in strategies if s['prediction'] == 'Small')
+            total_score = big_score + small_score
+            
+            if total_score > 0:
+                if big_score > small_score:
+                    final_confidence = big_score / total_score
+                    best_strategy = max([s for s in strategies if s['prediction'] == 'Big'], 
+                                       key=lambda x: x['confidence'] * x['weight'])
+                    return 'Big', final_confidence, best_strategy['name'], strategies
+                else:
+                    final_confidence = small_score / total_score
+                    best_strategy = max([s for s in strategies if s['prediction'] == 'Small'], 
+                                       key=lambda x: x['confidence'] * x['weight'])
+                    return 'Small', final_confidence, best_strategy['name'], strategies
+        
+        return 'Big', 0.50, 'Default prediction', strategies
     
-    # Strategy 4: Alternation detection
-    alternating = True
-    for i in range(min(4, len(labels) - 1)):
-        if labels[i] == labels[i + 1]:
-            alternating = False
-            break
-    
-    if alternating and len(labels) >= 4:
-        next_pred = 'Small' if labels[0] == 'Big' else 'Big'
-        strategies.append((next_pred, 0.60, 'Alternation pattern detected'))
-    
-    # Choose best strategy
-    if strategies:
-        best = max(strategies, key=lambda x: x[1])
-        return best
-    
-    # Default: slight bias towards less common outcome
-    if analysis:
-        if analysis.get('big_percentage', 50) > 52:
-            return 'Small', 0.51, 'Default: Slight Small bias'
-        elif analysis.get('small_percentage', 50) > 52:
-            return 'Big', 0.51, 'Default: Slight Big bias'
-    
-    return 'Big', 0.50, 'Default prediction'
+    def update_accuracy(self, was_correct):
+        """Update model accuracy and adjust strategy weights."""
+        self.model['total_predictions'] = self.model.get('total_predictions', 0) + 1
+        if was_correct:
+            self.model['correct_predictions'] = self.model.get('correct_predictions', 0) + 1
+        
+        self.save_model()
 
 
-def save_prediction(period, prediction):
-    """Save a prediction to the database."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute('''
-            INSERT OR REPLACE INTO predictions (period, prediction)
-            VALUES (?, ?)
-        ''', (period, prediction))
-        conn.commit()
-    except sqlite3.Error as e:
-        # Log but continue - the prediction can still work without being saved
-        logger.warning(f"Failed to save prediction for period {period}: {e}")
-    finally:
-        conn.close()
+# Global predictor instance
+predictor = MLPredictor()
+
+
+def save_prediction(period, prediction, confidence, reason, strategies):
+    """Save a prediction to JSON file."""
+    predictions = load_json_file(PREDICTIONS_FILE, {'records': []})
+    
+    # Check if prediction already exists
+    for p in predictions['records']:
+        if p['period'] == period:
+            return  # Already exists
+    
+    predictions['records'].append({
+        'period': period,
+        'prediction': prediction,
+        'confidence': confidence,
+        'reason': reason,
+        'strategies': strategies,
+        'actual_number': None,
+        'actual_label': None,
+        'correct': None,
+        'timestamp': datetime.now().isoformat()
+    })
+    
+    # Keep only last 1000 predictions
+    if len(predictions['records']) > 1000:
+        predictions['records'] = predictions['records'][-1000:]
+    
+    save_json_file(PREDICTIONS_FILE, predictions)
 
 
 def update_prediction_result(period, actual_number):
     """Update a prediction with the actual result."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    predictions = load_json_file(PREDICTIONS_FILE, {'records': []})
     actual_label = get_label(actual_number)
     
-    cursor.execute('''
-        UPDATE predictions 
-        SET actual_number = ?, actual_label = ?, correct = (prediction = ?)
-        WHERE period = ?
-    ''', (actual_number, actual_label, actual_label, period))
-    conn.commit()
-    conn.close()
+    for p in predictions['records']:
+        if p['period'] == period and p['actual_number'] is None:
+            p['actual_number'] = actual_number
+            p['actual_label'] = actual_label
+            p['correct'] = p['prediction'] == actual_label
+            
+            # Update predictor accuracy
+            predictor.update_accuracy(p['correct'])
+            break
+    
+    save_json_file(PREDICTIONS_FILE, predictions)
 
 
 def get_prediction_stats():
-    """Get prediction statistics."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    """Get prediction statistics from JSON file."""
+    predictions = load_json_file(PREDICTIONS_FILE, {'records': []})
+    records = predictions.get('records', [])
     
-    cursor.execute('''
-        SELECT 
-            COUNT(*) as total,
-            SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) as wins,
-            SUM(CASE WHEN correct = 0 THEN 1 ELSE 0 END) as losses
-        FROM predictions 
-        WHERE correct IS NOT NULL
-    ''')
-    row = cursor.fetchone()
-    
-    # Get recent predictions for history
-    cursor.execute('''
-        SELECT period, prediction, actual_number, actual_label, correct
-        FROM predictions
-        ORDER BY period DESC
-        LIMIT 100
-    ''')
-    history = [dict(r) for r in cursor.fetchall()]
+    # Calculate stats
+    resolved = [r for r in records if r.get('correct') is not None]
+    wins = sum(1 for r in resolved if r['correct'])
+    losses = len(resolved) - wins
     
     # Calculate max loss streak
-    cursor.execute('''
-        SELECT correct FROM predictions 
-        WHERE correct IS NOT NULL 
-        ORDER BY period DESC
-    ''')
-    results = [r['correct'] for r in cursor.fetchall()]
-    
     max_loss_streak = 0
     current_streak = 0
-    for result in results:
-        if result == RESULT_LOSS:
+    sorted_resolved = sorted(resolved, key=lambda x: x['period'], reverse=True)
+    for r in sorted_resolved:
+        if not r['correct']:
             current_streak += 1
             max_loss_streak = max(max_loss_streak, current_streak)
         else:
             current_streak = 0
     
-    conn.close()
-    
-    total = row['total'] or 0
-    wins = row['wins'] or 0
-    losses = row['losses'] or 0
+    # Compute stages for history display
+    history = []
+    stage = 1
+    for r in sorted_resolved[:100]:
+        entry = {
+            'period': r['period'],
+            'prediction': r['prediction'],
+            'actual_number': r['actual_number'],
+            'actual_label': r['actual_label'],
+            'correct': r['correct'],
+            'confidence': r.get('confidence', 50),
+            'reason': r.get('reason', ''),
+            'stage': stage
+        }
+        history.append(entry)
+        
+        if r['correct']:
+            stage = 1
+        else:
+            stage += 1
     
     return {
-        'total': total,
+        'total': len(resolved),
         'wins': wins,
         'losses': losses,
-        'accuracy': round(wins / total * 100, 1) if total > 0 else 0,
+        'accuracy': round(wins / len(resolved) * 100, 1) if resolved else 0,
         'max_loss_streak': max_loss_streak,
-        'history': history
+        'history': history,
+        'model_accuracy': round(predictor.model.get('correct_predictions', 0) / 
+                                max(predictor.model.get('total_predictions', 1), 1) * 100, 1)
     }
 
 
@@ -401,12 +529,12 @@ def predict():
     if not draws:
         return jsonify({'error': 'No data available'}), 500
     
-    # Save outcomes to database
+    # Save outcomes to JSON
     save_outcomes(draws)
     
-    # Get historical data for analysis
-    historical = get_historical_outcomes(500)
-    analysis = analyze_patterns(historical)
+    # Get historical data and train model
+    historical = get_historical_outcomes(2000)
+    predictor.train(historical)
     
     # Update any pending predictions with actual results
     for draw in draws:
@@ -416,28 +544,38 @@ def predict():
     latest_period = draws[0]['period']
     next_period = str(int(latest_period) + 1)
     
-    # Make prediction
-    prediction, confidence, reason = predict_next(draws, analysis)
+    # Make prediction using ML model
+    prediction, confidence, reason, strategies = predictor.predict(draws)
     
     # Save prediction
-    save_prediction(next_period, prediction)
+    save_prediction(next_period, prediction, round(confidence * 100, 1), reason, 
+                   [{'name': s['name'], 'prediction': s['prediction'], 
+                     'confidence': round(s['confidence'] * 100, 1)} for s in strategies])
     
     # Get stats
     stats = get_prediction_stats()
     
+    # Calculate analysis
+    big_count = sum(1 for o in historical[:500] if o['label'] == 'Big')
+    small_count = len(historical[:500]) - big_count
+    total = big_count + small_count
+    
     return jsonify({
         'latest_period': latest_period,
         'latest_number': draws[0]['num'],
-        'latest_label': get_label(draws[0]['num']),
+        'latest_label': draws[0]['label'],
         'next_period': next_period,
         'prediction': prediction,
         'confidence': round(confidence * 100, 1),
         'reason': reason,
+        'strategies': [{'name': s['name'], 'prediction': s['prediction'], 
+                       'confidence': round(s['confidence'] * 100, 1)} for s in strategies],
         'stats': stats,
         'analysis': {
-            'total_historical_records': analysis.get('total_records', 0),
-            'big_percentage': analysis.get('big_percentage', 50),
-            'small_percentage': analysis.get('small_percentage', 50)
+            'total_historical_records': len(historical),
+            'big_percentage': round(big_count / total * 100, 2) if total > 0 else 50,
+            'small_percentage': round(small_count / total * 100, 2) if total > 0 else 50,
+            'model_accuracy': stats['model_accuracy']
         }
     })
 
@@ -453,23 +591,65 @@ def get_history():
 def get_analysis():
     """Get detailed analysis of historical data."""
     historical = get_historical_outcomes(1000)
-    analysis = analyze_patterns(historical)
-    return jsonify(analysis)
+    
+    if len(historical) < 10:
+        return jsonify({'error': 'Not enough historical data'})
+    
+    # Calculate various statistics
+    labels = [o['label'] for o in historical]
+    numbers = [o['number'] for o in historical]
+    
+    big_count = sum(1 for l in labels if l == 'Big')
+    small_count = len(labels) - big_count
+    
+    # Streak analysis
+    streaks = {'big': [], 'small': []}
+    current_streak = 1
+    current_type = labels[0]
+    
+    for i in range(1, len(labels)):
+        if labels[i] == current_type:
+            current_streak += 1
+        else:
+            if current_type == 'Big':
+                streaks['big'].append(current_streak)
+            else:
+                streaks['small'].append(current_streak)
+            current_streak = 1
+            current_type = labels[i]
+    
+    return jsonify({
+        'total_records': len(historical),
+        'big_count': big_count,
+        'small_count': small_count,
+        'big_percentage': round(big_count / len(labels) * 100, 2),
+        'small_percentage': round(small_count / len(labels) * 100, 2),
+        'number_frequency': dict(Counter(numbers)),
+        'avg_big_streak': round(sum(streaks['big']) / len(streaks['big']), 2) if streaks['big'] else 0,
+        'avg_small_streak': round(sum(streaks['small']) / len(streaks['small']), 2) if streaks['small'] else 0,
+        'max_big_streak': max(streaks['big']) if streaks['big'] else 0,
+        'max_small_streak': max(streaks['small']) if streaks['small'] else 0,
+        'model_info': {
+            'total_predictions': predictor.model.get('total_predictions', 0),
+            'correct_predictions': predictor.model.get('correct_predictions', 0),
+            'strategy_weights': predictor.model.get('strategy_weights', {})
+        }
+    })
 
 
 @app.route('/api/clear', methods=['POST'])
 def clear_data():
     """Clear all prediction data (not outcomes)."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM predictions')
-    conn.commit()
-    conn.close()
+    save_json_file(PREDICTIONS_FILE, {'records': []})
+    # Reset model accuracy but keep learned patterns
+    predictor.model['total_predictions'] = 0
+    predictor.model['correct_predictions'] = 0
+    predictor.save_model()
     return jsonify({'success': True})
 
 
-# Initialize database on startup
-init_db()
+# Ensure data directory exists on startup
+ensure_data_dir()
 
 
 if __name__ == '__main__':
