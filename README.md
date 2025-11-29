@@ -38,6 +38,11 @@ A Python-powered prediction system for WinGo 30S game that uses historical data 
    python app.py
    ```
 
+   For development with debug mode enabled:
+   ```bash
+   FLASK_DEBUG=true python app.py
+   ```
+
 4. Open your browser and navigate to `http://localhost:5000`
 
 ## Project Structure
