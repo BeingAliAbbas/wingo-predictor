@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 MAX_STREAK_LENGTH = 7  # Maximum streak length to analyze
 MIN_SEQUENCE_DATA = 5  # Minimum data points for sequence pattern reliability
 DISTRIBUTION_THRESHOLD = 7  # Number of recent outcomes to trigger distribution correction
+MOMENTUM_WINDOW = 20  # Window size for momentum/trend analysis
+RECENCY_BIAS = 0.8  # Weight for more recent outcomes in calculations
+RECENCY_SCALE_FACTOR = 10  # Scale factor for recency weighting
+HOT_NUMBER_THRESHOLD = 0.11  # Frequency above this is considered "hot" (>11%)
+COLD_NUMBER_THRESHOLD = 0.09  # Frequency below this is considered "cold" (<9%)
 
 app = Flask(__name__)
 
@@ -152,6 +157,9 @@ class MLPredictor:
     2. Pattern recognition for streaks
     3. Weighted ensemble voting
     4. Adaptive learning based on prediction accuracy
+    5. Multi-length sequence patterns
+    6. Momentum/trend analysis
+    7. Hot/cold analysis
     """
     
     def __init__(self):
@@ -165,15 +173,22 @@ class MLPredictor:
                 'Small': {'Big': 0.5, 'Small': 0.5}
             },
             'streak_patterns': {},  # streak_length -> {after_big: {Big: count, Small: count}, after_small: {...}}
-            'sequence_patterns': {},  # 3-length sequences -> next outcome counts
+            'sequence_patterns_3': {},  # 3-length sequences -> next outcome counts
+            'sequence_patterns_4': {},  # 4-length sequences -> next outcome counts
+            'sequence_patterns_5': {},  # 5-length sequences -> next outcome counts
             'number_frequency': {},
             'strategy_weights': {
                 'markov': 1.0,
-                'streak': 1.0,
-                'sequence': 1.0,
-                'frequency': 1.0,
-                'alternation': 1.0
+                'streak': 1.2,
+                'sequence_3': 1.0,
+                'sequence_4': 1.1,
+                'sequence_5': 1.2,
+                'frequency': 0.9,
+                'alternation': 1.0,
+                'momentum': 1.1,
+                'hot_cold': 0.8
             },
+            'strategy_performance': {},  # Track how each strategy performs
             'total_predictions': 0,
             'correct_predictions': 0
         }
@@ -191,12 +206,15 @@ class MLPredictor:
         # Sort outcomes chronologically (oldest first for training)
         sorted_outcomes = sorted(outcomes, key=lambda x: x['period'])
         
-        # 1. Build Markov Chain transition probabilities
+        # 1. Build Markov Chain transition probabilities with recency weighting
         transitions = {'Big': {'Big': 0, 'Small': 0}, 'Small': {'Big': 0, 'Small': 0}}
-        for i in range(len(sorted_outcomes) - 1):
+        n = len(sorted_outcomes)
+        for i in range(n - 1):
             current = sorted_outcomes[i]['label']
             next_label = sorted_outcomes[i + 1]['label']
-            transitions[current][next_label] += 1
+            # Apply recency weighting - more recent transitions count more
+            weight = RECENCY_BIAS ** ((n - 2 - i) / max(n - 1, 1) * RECENCY_SCALE_FACTOR)
+            transitions[current][next_label] += weight
         
         # Normalize to probabilities with Laplace smoothing
         for state in transitions:
@@ -215,11 +233,9 @@ class MLPredictor:
             }
         
         for i in range(len(sorted_outcomes)):
-            # Check for streaks ending at position i
             if i < 2:
                 continue
             
-            # Count streak length backwards
             streak_type = sorted_outcomes[i - 1]['label']
             streak_len = 1
             for j in range(i - 2, -1, -1):
@@ -237,24 +253,49 @@ class MLPredictor:
         
         self.model['streak_patterns'] = {str(k): v for k, v in streak_patterns.items()}
         
-        # 3. Build 3-sequence pattern statistics
-        sequence_patterns = {}
-        for i in range(3, len(sorted_outcomes)):
-            seq = tuple(sorted_outcomes[j]['label'] for j in range(i - 3, i))
-            seq_key = ''.join('B' if s == 'Big' else 'S' for s in seq)
-            next_label = sorted_outcomes[i]['label']
+        # 3. Build multi-length sequence pattern statistics (3, 4, 5)
+        for seq_len in [3, 4, 5]:
+            sequence_patterns = {}
+            for i in range(seq_len, len(sorted_outcomes)):
+                seq = tuple(sorted_outcomes[j]['label'] for j in range(i - seq_len, i))
+                seq_key = ''.join('B' if s == 'Big' else 'S' for s in seq)
+                next_label = sorted_outcomes[i]['label']
+                
+                if seq_key not in sequence_patterns:
+                    sequence_patterns[seq_key] = {'Big': 0, 'Small': 0}
+                sequence_patterns[seq_key][next_label] += 1
             
-            if seq_key not in sequence_patterns:
-                sequence_patterns[seq_key] = {'Big': 0, 'Small': 0}
-            sequence_patterns[seq_key][next_label] += 1
-        
-        self.model['sequence_patterns'] = sequence_patterns
+            self.model[f'sequence_patterns_{seq_len}'] = sequence_patterns
         
         # 4. Number frequency analysis
         number_freq = Counter(o['number'] for o in sorted_outcomes)
         self.model['number_frequency'] = dict(number_freq)
         
         self.save_model()
+    
+    def calculate_momentum(self, labels):
+        """Calculate momentum/trend in recent outcomes.
+        
+        Note: labels is already sorted with most recent first (index 0 = most recent).
+        So labels[:10] gets the 10 most recent, labels[10:20] gets the older 10.
+        """
+        if len(labels) < MOMENTUM_WINDOW:
+            return 0, 'neutral'
+        
+        # Count Big vs Small in windows (labels[0] is most recent)
+        recent_half = labels[:MOMENTUM_WINDOW // 2]  # 10 most recent outcomes
+        older_half = labels[MOMENTUM_WINDOW // 2:MOMENTUM_WINDOW]  # 10 older outcomes
+        
+        recent_big_pct = sum(1 for l in recent_half if l == 'Big') / len(recent_half)
+        older_big_pct = sum(1 for l in older_half if l == 'Big') / len(older_half)
+        
+        momentum = recent_big_pct - older_big_pct
+        
+        if momentum > 0.15:
+            return momentum, 'Big'  # Trending towards Big
+        elif momentum < -0.15:
+            return abs(momentum), 'Small'  # Trending towards Small
+        return abs(momentum), 'neutral'
     
     def predict(self, recent_draws):
         """
@@ -264,7 +305,8 @@ class MLPredictor:
         if not recent_draws or len(recent_draws) < 3:
             return 'Big', 0.5, 'Insufficient data', []
         
-        labels = [d['label'] for d in recent_draws[:10]]
+        labels = [d['label'] for d in recent_draws[:20]]  # Extended to 20 for momentum
+        numbers = [d['num'] for d in recent_draws[:20]]
         strategies = []
         
         # Strategy 1: Markov Chain
@@ -285,7 +327,7 @@ class MLPredictor:
                 'weight': self.model['strategy_weights']['markov']
             })
         
-        # Strategy 2: Streak Analysis
+        # Strategy 2: Streak Analysis with improved weighting
         streak_len = 1
         for i in range(1, len(labels)):
             if labels[i] == labels[0]:
@@ -303,47 +345,54 @@ class MLPredictor:
                 prob_big = streak_after['Big'] / total
                 prob_small = streak_after['Small'] / total
                 
-                if prob_big > prob_small:
-                    strategies.append({
-                        'name': f'Streak Analysis ({streak_len}x {labels[0]})',
-                        'prediction': 'Big',
-                        'confidence': prob_big,
-                        'weight': self.model['strategy_weights']['streak'] * min(streak_len / 3, 1.5)
-                    })
-                else:
-                    strategies.append({
-                        'name': f'Streak Analysis ({streak_len}x {labels[0]})',
-                        'prediction': 'Small',
-                        'confidence': prob_small,
-                        'weight': self.model['strategy_weights']['streak'] * min(streak_len / 3, 1.5)
-                    })
-        
-        # Strategy 3: Sequence Pattern
-        if len(labels) >= 3:
-            seq_key = ''.join('B' if l == 'Big' else 'S' for l in labels[:3])
-            seq_data = self.model['sequence_patterns'].get(seq_key, {'Big': 1, 'Small': 1})
-            total = seq_data['Big'] + seq_data['Small']
-            
-            if total > MIN_SEQUENCE_DATA:  # Only use if we have enough data
-                prob_big = seq_data['Big'] / total
-                prob_small = seq_data['Small'] / total
+                # Boost weight for longer streaks
+                streak_weight = self.model['strategy_weights']['streak'] * (1 + (streak_len - 2) * 0.15)
                 
                 if prob_big > prob_small:
                     strategies.append({
-                        'name': f'Sequence Pattern ({seq_key})',
+                        'name': f'Streak Analysis ({streak_len}x {labels[0]})',
                         'prediction': 'Big',
                         'confidence': prob_big,
-                        'weight': self.model['strategy_weights']['sequence']
+                        'weight': streak_weight
                     })
                 else:
                     strategies.append({
-                        'name': f'Sequence Pattern ({seq_key})',
+                        'name': f'Streak Analysis ({streak_len}x {labels[0]})',
                         'prediction': 'Small',
                         'confidence': prob_small,
-                        'weight': self.model['strategy_weights']['sequence']
+                        'weight': streak_weight
                     })
         
-        # Strategy 4: Distribution Correction
+        # Strategy 3, 4, 5: Multi-length Sequence Patterns
+        for seq_len in [3, 4, 5]:
+            if len(labels) >= seq_len:
+                seq_key = ''.join('B' if l == 'Big' else 'S' for l in labels[:seq_len])
+                seq_data = self.model.get(f'sequence_patterns_{seq_len}', {}).get(seq_key, {'Big': 1, 'Small': 1})
+                total = seq_data['Big'] + seq_data['Small']
+                
+                min_data = MIN_SEQUENCE_DATA + (seq_len - 3) * 2  # More data needed for longer sequences
+                if total > min_data:
+                    prob_big = seq_data['Big'] / total
+                    prob_small = seq_data['Small'] / total
+                    
+                    weight = self.model['strategy_weights'].get(f'sequence_{seq_len}', 1.0)
+                    
+                    if prob_big > prob_small:
+                        strategies.append({
+                            'name': f'Sequence-{seq_len} ({seq_key})',
+                            'prediction': 'Big',
+                            'confidence': prob_big,
+                            'weight': weight
+                        })
+                    else:
+                        strategies.append({
+                            'name': f'Sequence-{seq_len} ({seq_key})',
+                            'prediction': 'Small',
+                            'confidence': prob_small,
+                            'weight': weight
+                        })
+        
+        # Strategy 6: Distribution Correction
         recent_big = sum(1 for l in labels[:10] if l == 'Big')
         recent_small = 10 - recent_big if len(labels) >= 10 else len(labels) - recent_big
         
@@ -362,7 +411,7 @@ class MLPredictor:
                 'weight': self.model['strategy_weights']['frequency']
             })
         
-        # Strategy 5: Alternation Detection
+        # Strategy 7: Alternation Detection
         alternating = True
         for i in range(min(4, len(labels) - 1)):
             if labels[i] == labels[i + 1]:
@@ -374,9 +423,43 @@ class MLPredictor:
             strategies.append({
                 'name': 'Alternation Pattern',
                 'prediction': next_pred,
-                'confidence': 0.60,
+                'confidence': 0.62,
                 'weight': self.model['strategy_weights']['alternation']
             })
+        
+        # Strategy 8: Momentum/Trend Analysis
+        if len(labels) >= MOMENTUM_WINDOW:
+            momentum_strength, momentum_direction = self.calculate_momentum(labels)
+            if momentum_direction != 'neutral' and momentum_strength > 0.1:
+                # Predict against the momentum (mean reversion)
+                counter_pred = 'Small' if momentum_direction == 'Big' else 'Big'
+                strategies.append({
+                    'name': f'Momentum Reversal ({momentum_direction} trend)',
+                    'prediction': counter_pred,
+                    'confidence': 0.52 + momentum_strength * 0.3,
+                    'weight': self.model['strategy_weights']['momentum']
+                })
+        
+        # Strategy 9: Hot/Cold Number Analysis
+        if numbers:
+            freq = self.model.get('number_frequency', {})
+            total_freq = sum(freq.values()) if freq else 1
+            recent_nums = numbers[:5]
+            
+            # Check if recent numbers are "hot" (frequent) or "cold" (rare)
+            hot_count = sum(1 for n in recent_nums if freq.get(str(n), 0) / total_freq > HOT_NUMBER_THRESHOLD)
+            cold_count = sum(1 for n in recent_nums if freq.get(str(n), 0) / total_freq < COLD_NUMBER_THRESHOLD)
+            
+            if hot_count >= 3:
+                # Hot numbers tend to cool down - use get_label logic for consistency
+                big_count_in_recent = sum(1 for n in recent_nums if get_label(n) == 'Big')
+                cold_prediction = 'Small' if big_count_in_recent > 2 else 'Big'
+                strategies.append({
+                    'name': f'Hot Numbers Cooling ({hot_count}/5 hot)',
+                    'prediction': cold_prediction,
+                    'confidence': 0.53,
+                    'weight': self.model['strategy_weights']['hot_cold']
+                })
         
         # Ensemble voting with weighted confidence
         if strategies:
