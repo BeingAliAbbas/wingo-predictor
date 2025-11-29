@@ -6,10 +6,19 @@ A Flask application that predicts WinGo outcomes using historical data analysis.
 import sqlite3
 import os
 import time
+import logging
 import requests
 from flask import Flask, jsonify, render_template, request
 from collections import Counter
 from datetime import datetime
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Constants for prediction results
+RESULT_WIN = 1
+RESULT_LOSS = 0
 
 app = Flask(__name__)
 
@@ -105,8 +114,9 @@ def save_outcomes(draws):
                 INSERT OR IGNORE INTO outcomes (period, number, label)
                 VALUES (?, ?, ?)
             ''', (draw['period'], draw['num'], get_label(draw['num'])))
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as e:
+            # Log but continue - duplicate inserts are expected and handled by IGNORE
+            logger.debug(f"Database insert ignored for period {draw['period']}: {e}")
     
     conn.commit()
     conn.close()
@@ -294,8 +304,9 @@ def save_prediction(period, prediction):
             VALUES (?, ?)
         ''', (period, prediction))
         conn.commit()
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as e:
+        # Log but continue - the prediction can still work without being saved
+        logger.warning(f"Failed to save prediction for period {period}: {e}")
     finally:
         conn.close()
 
@@ -350,7 +361,7 @@ def get_prediction_stats():
     max_loss_streak = 0
     current_streak = 0
     for result in results:
-        if result == 0:
+        if result == RESULT_LOSS:
             current_streak += 1
             max_loss_streak = max(max_loss_streak, current_streak)
         else:
