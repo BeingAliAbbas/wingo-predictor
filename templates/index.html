@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>Ali Abbas - Wingo 30S Predictor</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <meta name="theme-color" content="#232946"/>
+  <style>
+    body {
+      background: linear-gradient(135deg, #232946 0%, #1e1b4b 100%);
+      min-height: 100vh;
+    }
+    .glass {
+      background: rgba(35, 41, 70, 0.90);
+      box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.25);
+      border-radius: 1.5rem;
+      border: 1px solid rgba(255,255,255,0.08);
+      backdrop-filter: blur(10px);
+    }
+    .neumorph {
+      box-shadow:
+        2px 2px 8px #1e1b4b,
+        -2px -2px 8px #262c4a;
+      border-radius: 1.25rem;
+    }
+    .scrollbar-hide::-webkit-scrollbar { display: none; }
+    .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+    .glow-container {
+      background: #191919;
+      border-radius: 18px;
+      box-shadow:  0 0 0 1.5px #14b8a6;
+      margin-bottom: 18px;
+      padding: 16px 20px 10px 18px;
+      position: relative;
+      opacity: 0;
+      transform: translateY(15px);
+      transition: opacity 0.5s, transform 0.5s;
+    }
+    .glow-container.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .glow-success {
+      color: #22ff22;
+      font-size: 1.5rem;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+    .glow-fail {
+      color: #ff2222;
+      font-size: 1.5rem;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+    .glow-info { color: #06f1f7; }
+    .glow-label {
+      font-weight: 700;
+      font-size: 1.09rem;
+      letter-spacing: 0.01em;
+    }
+    .stage-label {
+      font-size: 0.97em;
+      font-weight: 600;
+      margin-left: 10px;
+      color: #ffd93a;
+    }
+    .glow-row {
+      display: flex;
+      align-items: center;
+      margin-bottom: 7px;
+      gap: 8px;
+      font-size: 1rem;
+    }
+    .glow-icon {
+      margin-right: 9px;
+      font-size: 1.2rem;
+      vertical-align: middle;
+    }
+    .glow-right {
+      position: absolute;
+      top: 16px;
+      right: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .glow-trophy {
+      color: #20e720;
+      font-size: 1.6rem;
+      filter: drop-shadow(0 0 2px #13ef13cc);
+    }
+    .glow-x {
+      color: #ff4444;
+      font-size: 1.5rem;
+      filter: drop-shadow(0 0 2px #e81c1cbb);
+    }
+    /* Smooth prediction card transitions */
+    .prediction-fade {
+      opacity: 0;
+      transform: scale(0.95);
+      transition: opacity 0.5s, transform 0.5s;
+    }
+    .prediction-fade.show {
+      opacity: 1;
+      transform: scale(1);
+    }
+    .confidence-bar {
+      height: 6px;
+      background: #333;
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 4px;
+    }
+    .confidence-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #6366f1, #22c55e);
+      border-radius: 3px;
+      transition: width 0.3s;
+    }
+    @media (max-width: 640px) {
+      .glass { padding: 0.5rem !important; }
+      .glow-container { padding: 8px 7px 7px 8px; }
+      .glow-right { right: 9px; top: 8px; }
+    }
+  </style>
+</head>
+<body class="text-neutral-100">
+  <main class="flex flex-col min-h-screen justify-center items-center px-1 sm:px-2 bg-gradient-to-br from-[#232946] to-[#1e1b4b]">
+    <section class="w-full max-w-2xl glass px-2 sm:px-7 py-3 sm:py-7 mt-3 sm:mt-6 neumorph">
+      <!-- Header -->
+      <header class="flex flex-col items-center mb-5 sm:mb-6">
+        <span class="text-3xl sm:text-4xl font-extrabold tracking-tight text-indigo-400 drop-shadow-sm flex items-center">
+          <svg class="inline w-8 h-8 sm:w-10 sm:h-10 mr-1 sm:mr-2 -mt-1 sm:-mt-2" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" fill="#6366f1"/><text x="50%" y="56%" text-anchor="middle" fill="#fff" font-size="10" font-family="Arial" dy=".3em">🔮</text></svg>
+          WinGo 30S Predictor
+        </span>
+        <span class="text-xs sm:text-base text-neutral-300 mt-1 sm:mt-2 text-center">Predicting the future, every 30 seconds</span>
+        <span class="text-xs text-green-400 mt-1">🐍 Python-Powered • 📊 Historical Data Analysis</span>
+      </header>
+
+      <!-- Data Stats -->
+      <div id="dataStats" class="flex flex-row items-center justify-center gap-4 mb-4 text-xs text-neutral-400">
+        <span>📊 Historical Records: <span id="historicalCount" class="text-indigo-300 font-bold">--</span></span>
+        <span>📈 Big/Small: <span id="distribution" class="text-indigo-300 font-bold">--</span></span>
+      </div>
+
+      <!-- Prediction & Dashboard Area -->
+      <div id="predictionDashboardArea" class="flex flex-col gap-6 mb-8">
+        <!-- Dashboard -->
+        <div id="dashboard" class="flex flex-row items-center justify-between bg-neutral-900/80 glass neumorph rounded-xl p-4 gap-3 text-center">
+          <div>
+            <div class="text-xs text-neutral-400 mb-1">Wins</div>
+            <div id="wins" class="text-2xl font-bold text-green-400">0</div>
+          </div>
+          <div>
+            <div class="text-xs text-neutral-400 mb-1">Losses</div>
+            <div id="losses" class="text-2xl font-bold text-red-400">0</div>
+          </div>
+          <div>
+            <div class="text-xs text-neutral-400 mb-1">Accuracy</div>
+            <div id="accuracy" class="text-2xl font-bold text-blue-300">--</div>
+          </div>
+          <div>
+            <div class="text-xs text-neutral-400 mb-1">Total Games</div>
+            <div id="total" class="text-2xl font-bold text-indigo-300">0</div>
+          </div>
+          <div>
+            <div class="text-xs text-neutral-400 mb-1">Max Loss Streak</div>
+            <div id="maxLossStreak" class="text-2xl font-bold text-yellow-400">0</div>
+          </div>
+        </div>
+  
+        <!-- Prediction Card -->
+        <div id="predictionCardGroup" class="grid grid-cols-1 sm:grid-cols-4 gap-3 sm:gap-4 mb-0 prediction-fade show">
+          <div class="flex flex-col justify-center items-center bg-neutral-800/80 neumorph px-3 py-3 sm:px-5 sm:py-4 rounded-xl shadow">
+            <span class="text-xs sm:text-sm text-neutral-400 tracking-wide">Next Period</span>
+            <span id="nextPeriod" class="text-xl sm:text-2xl font-mono font-bold mt-1 break-all">Loading</span>
+          </div>
+          <div class="flex flex-col justify-center items-center bg-neutral-800/80 neumorph px-3 py-3 sm:px-5 sm:py-4 rounded-xl shadow">
+            <span class="text-xs sm:text-sm text-neutral-400 tracking-wide">Prediction</span>
+            <span id="nextPrediction" class="text-xl sm:text-2xl font-bold mt-1 transition-all">Loading</span>
+            <div class="confidence-bar w-full mt-2">
+              <div id="confidenceFill" class="confidence-fill" style="width: 50%"></div>
+            </div>
+            <span id="confidenceText" class="text-xs text-neutral-400 mt-1">Confidence: --</span>
+          </div>
+          <div class="flex flex-col justify-center items-center bg-neutral-800/80 neumorph px-3 py-3 sm:px-5 sm:py-4 rounded-xl shadow">
+            <span class="text-xs sm:text-sm text-neutral-400 tracking-wide">Time Left</span>
+            <span id="countdown" class="text-base sm:text-lg font-mono mt-1">Loading</span>
+          </div>
+          <div class="flex flex-col justify-center items-center bg-neutral-800/80 neumorph px-3 py-3 sm:px-5 sm:py-4 rounded-xl shadow">
+            <span class="text-xs sm:text-sm text-neutral-400 tracking-wide">Strategy</span>
+            <span id="strategyReason" class="text-xs text-center text-indigo-300 mt-1">Loading</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Error Panel - Only shown for draw API errors -->
+      <div id="errorPanel" class="hidden bg-red-900/80 text-red-200 rounded-lg px-4 py-3 mb-4 sm:mb-6 font-mono text-xs"></div>
+
+      <!-- History Area (separate block below prediction/dashboard) -->
+      <div id="historyArea" class="w-full mt-3">
+        <div class="flex flex-col mb-2">
+          <span class="text-lg font-bold text-indigo-300 mb-1">History</span>
+        </div>
+        <!-- History - Card/Container Style -->
+        <div id="historyList" class="flex flex-col"></div>
+        <!-- Controls: Clear button below history records -->
+        <div class="flex flex-col sm:flex-row items-center justify-between gap-2 sm:gap-0 mt-2">
+          <button id="clearBtn"
+            class="w-full sm:w-auto bg-red-500 hover:bg-red-600 transition px-4 py-2 font-semibold rounded-lg shadow text-white mb-1 sm:mb-0">
+            🗑️ Clear History
+          </button>
+        </div>
+      </div>
+
+      <!-- Credit Card -->
+      <div class="flex justify-center mt-8">
+        <div class="flex flex-col items-center bg-neutral-900/90 border border-neutral-700 rounded-xl shadow-md px-10 py-5 w-full max-w-2xl">
+          <div class="flex items-center gap-2 mb-2">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-7 w-7 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <circle cx="12" cy="12" r="10" fill="#6366f1"/>
+              <text x="50%" y="56%" text-anchor="middle" fill="#fff" font-size="12" font-family="Arial" dy=".3em">👨‍💻</text>
+            </svg>
+            <span class="text-lg font-semibold text-indigo-200">Made by Ali Abbas</span>
+          </div>
+          <span class="text-xs text-neutral-400 mb-1">WhatsApp</span>
+          <a href="https://wa.me/923483469617" target="_blank" class="text-sm font-mono text-green-400 hover:underline hover:text-green-300 transition">
+            +92 348 3469617
+          </a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+const API_BASE = window.location.origin;
+let lastPeriod = null;
+
+function showError(msg) {
+  const el = document.getElementById('errorPanel');
+  if (el) {
+    el.textContent = msg;
+    el.classList.remove("hidden");
+  }
+}
+function hideError() {
+  const el = document.getElementById('errorPanel');
+  if (el) el.classList.add("hidden");
+}
+
+const pad = n => n < 10 ? '0' + n : n;
+
+function colorClass(lab) {
+  if (lab === 'Big') return 'text-pink-400';
+  if (lab === 'Small') return 'text-green-400';
+  return 'text-neutral-300';
+}
+function resultIcon(correct) {
+  return correct
+    ? '<span class="glow-trophy" title="Win">🏆</span>'
+    : '<span class="glow-x" title="Loss">✖️</span>';
+}
+
+// Compute the stage for each result (number of consecutive losses before win)
+function computeStages(hist) {
+  let stage = 1, maxLossStreak = 0, currentLossStreak = 0;
+  for (let i = hist.length - 1; i >= 0; i--) {
+    const h = hist[i];
+    if (h.correct !== null) {
+      h.stage = stage;
+      if (h.correct) {
+        if (currentLossStreak > maxLossStreak) maxLossStreak = currentLossStreak;
+        currentLossStreak = 0;
+        stage = 1;
+      } else {
+        currentLossStreak++;
+        stage++;
+      }
+    } else {
+      h.stage = undefined;
+    }
+  }
+  // Final check in case the last entries are losses
+  if (currentLossStreak > maxLossStreak) maxLossStreak = currentLossStreak;
+  return maxLossStreak;
+}
+
+function renderDashboard(stats) {
+  const winsEl = document.getElementById('wins');
+  const lossesEl = document.getElementById('losses');
+  const totalEl = document.getElementById('total');
+  const accuracyEl = document.getElementById('accuracy');
+  const maxLossStreakEl = document.getElementById('maxLossStreak');
+  
+  if (winsEl) winsEl.textContent = stats.wins || 0;
+  if (lossesEl) lossesEl.textContent = stats.losses || 0;
+  if (totalEl) totalEl.textContent = stats.total || 0;
+  if (accuracyEl) accuracyEl.textContent = stats.accuracy ? stats.accuracy + '%' : '--';
+  if (maxLossStreakEl) maxLossStreakEl.textContent = stats.max_loss_streak || 0;
+}
+
+// Animate new history cards with fade in
+function renderHistory(history) {
+  const list = document.getElementById('historyList');
+  if (!list) return;
+  list.innerHTML = '';
+  
+  // Compute and set the stages
+  computeStages(history);
+  
+  // Filter out predictions that are not resolved yet
+  const filtered = history.filter(e => e.actual_number !== null);
+  filtered.slice(0, 50).forEach((e, idx) => {
+    const div = document.createElement('div');
+    div.className = 'glow-container';
+    let stageInfo = '';
+    if (e.correct !== null && e.stage !== undefined) {
+      if (e.correct && e.stage > 1) {
+        // Only show stage win if not first stage
+        let suffix = 'th';
+        if (e.stage === 1) suffix = 'st';
+        else if (e.stage === 2) suffix = 'nd';
+        else if (e.stage === 3) suffix = 'rd';
+        stageInfo = `<span class="stage-label">WON at ${e.stage}${suffix} stage</span>`;
+      } else if (!e.correct) {
+        stageInfo = `<span class="stage-label">at stage ${e.stage}</span>`;
+      }
+    }
+    div.innerHTML = `
+      <div class="glow-row">
+        <span class="glow-icon">📅</span>
+        <span class="glow-info">Period: <span class="glow-label">${e.period}</span></span>
+      </div>
+      <div class="glow-row">
+        <span class="glow-icon">📝</span>
+        <span class="glow-info">Prediction: <span class="glow-label ${colorClass(e.prediction)}">${e.prediction}</span></span>
+      </div>
+      <div class="glow-row">
+        <span class="glow-icon">🔽</span>
+        <span class="glow-info">Result: <span class="glow-label ${colorClass(e.actual_label)}">${e.actual_label} <span style="font-weight: 400;">(${e.actual_number})</span></span></span>
+        ${stageInfo}
+      </div>
+      <div class="glow-right">
+        ${e.correct !== null ? resultIcon(e.correct) : ''}
+      </div>
+    `;
+    list.appendChild(div);
+    // Animate fade in
+    setTimeout(() => div.classList.add('show'), 30 * idx);
+  });
+}
+
+// -- TIMER LOGIC --
+let countdownIv = null;
+function startCountdown(seconds = 30) {
+  if (countdownIv) clearInterval(countdownIv);
+  let cnt = seconds;
+  const el = document.getElementById('countdown');
+  function update() {
+    if (!el) return;
+    let min = Math.floor(cnt / 60);
+    let sec = cnt % 60;
+    el.textContent = `${pad(min)}:${pad(sec)}`;
+    if (cnt <= 0) {
+      clearInterval(countdownIv);
+      el.textContent = "00:00";
+    }
+    cnt--;
+  }
+  update();
+  countdownIv = setInterval(update, 1000);
+}
+
+// Animate prediction card area on change
+function animatePredictionCard() {
+  const card = document.getElementById('predictionCardGroup');
+  if (!card) return;
+  card.classList.remove('show');
+  // Force reflow for restart animation
+  void card.offsetWidth;
+  setTimeout(() => card.classList.add('show'), 20);
+}
+
+let prevPeriod = null;
+let lastPeriodForTimer = null;
+
+async function tick(force = false) {
+  try {
+    const response = await fetch(`${API_BASE}/api/predict?ts=${Date.now()}`);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    
+    if (data.error) {
+      showError(data.error);
+      return;
+    }
+    
+    hideError();
+    
+    // Reset timer if period changes (or first time)
+    if (lastPeriodForTimer !== data.latest_period) {
+      startCountdown(30);
+      lastPeriodForTimer = data.latest_period;
+    }
+    
+    // Update data stats
+    const historicalCountEl = document.getElementById('historicalCount');
+    const distributionEl = document.getElementById('distribution');
+    if (historicalCountEl) historicalCountEl.textContent = data.analysis?.total_historical_records || '--';
+    if (distributionEl) {
+      const bigPct = data.analysis?.big_percentage || 50;
+      const smallPct = data.analysis?.small_percentage || 50;
+      distributionEl.textContent = `${bigPct}% / ${smallPct}%`;
+    }
+    
+    // Animate prediction card only if period changes
+    if (prevPeriod !== data.next_period) {
+      animatePredictionCard();
+      prevPeriod = data.next_period;
+    }
+    
+    // Update UI
+    const nextPeriodEl = document.getElementById('nextPeriod');
+    if (nextPeriodEl) nextPeriodEl.textContent = data.next_period;
+    
+    const np = document.getElementById('nextPrediction');
+    if (np) {
+      np.textContent = data.prediction;
+      np.className = colorClass(data.prediction) + ' text-xl sm:text-2xl font-bold mt-1 transition-all';
+    }
+    
+    // Update confidence
+    const confidenceFill = document.getElementById('confidenceFill');
+    const confidenceText = document.getElementById('confidenceText');
+    if (confidenceFill) confidenceFill.style.width = `${data.confidence}%`;
+    if (confidenceText) confidenceText.textContent = `Confidence: ${data.confidence}%`;
+    
+    // Update strategy reason
+    const strategyReason = document.getElementById('strategyReason');
+    if (strategyReason) strategyReason.textContent = data.reason || '--';
+    
+    // Render dashboard and history
+    renderDashboard(data.stats);
+    renderHistory(data.stats.history || []);
+    
+    lastPeriod = data.latest_period;
+    
+  } catch (err) {
+    showError("Update error: " + err.message);
+    const countdownEl = document.getElementById('countdown');
+    if (countdownEl) countdownEl.textContent = "Error";
+  }
+}
+
+// Poll for updates
+async function startPolling() {
+  await tick(true);
+  setInterval(() => tick(), 5000); // Poll every 5 seconds
+}
+
+const clearBtn = document.getElementById('clearBtn');
+if (clearBtn) {
+  clearBtn.addEventListener('click', async () => {
+    if (window.confirm("Clear all prediction history?")) {
+      try {
+        await fetch(`${API_BASE}/api/clear`, { method: 'POST' });
+        tick(true);
+      } catch (err) {
+        showError("Error clearing history: " + err.message);
+      }
+    }
+  });
+}
+
+startPolling();
+  </script>
+</body>
+</html>
